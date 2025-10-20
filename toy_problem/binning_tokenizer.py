@@ -39,10 +39,12 @@ class BinningTokenizer:
         flat_data = data.flatten()
         min_val = flat_data.min()
         max_val = flat_data.max()
+        print(flat_data)
         
         # Add small padding to avoid edge cases
         padding = (max_val - min_val) * 0.01
-        self.value_range = (min_val - padding, max_val + padding)
+
+        self.value_range = (min_val, max_val)
         self.bin_width = (self.value_range[1] - self.value_range[0]) / self.num_bins
         
         print(f"Fitted tokenizer with range [{self.value_range[0]:.3f}, {self.value_range[1]:.3f}]")
@@ -185,3 +187,5 @@ if __name__ == "__main__":
     
     print("\nNote: As sampling rate increases, marginal information decreases")
     print("This explains why naive tokenization fails at high frequencies.")
+
+    print(targets.shape)

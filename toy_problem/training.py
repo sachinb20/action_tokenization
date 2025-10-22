@@ -17,6 +17,7 @@ import os
 
 from cubic_spline_generator import CubicSplineGenerator
 from binning_tokenizer import BinningTokenizer
+from fast_tokenizer import FASTTokenizer
 from transformer_model import SimpleTransformer
 
 
@@ -25,7 +26,7 @@ class Trainer:
     
     def __init__(self, 
                  model: nn.Module,
-                 tokenizer: BinningTokenizer,
+                 tokenizer,  # Can be BinningTokenizer or FASTTokenizer
                  device: torch.device,
                  learning_rate: float = 1e-3,
                  weight_decay: float = 1e-4):
@@ -180,7 +181,7 @@ class Trainer:
               train_loader: DataLoader,
               val_loader: DataLoader,
               num_epochs: int = 100,
-              patience: int = 10,
+              patience: int = 100,
               save_path: str = None) -> Dict[str, List[float]]:
         """
         Train the model.

@@ -23,11 +23,15 @@ class PositionalEncoding(nn.Module):
         
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        # For batch_first=True, keep shape as [1, max_len, d_model]
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
     
     def forward(self, x):
-        return x + self.pe[:x.size(0), :]
+        # x shape: [batch_size, seq_len, d_model] for batch_first=True
+        # pe shape: [1, max_len, d_model]
+        seq_len = x.size(1)
+        return x + self.pe[:, :seq_len, :]
 
 
 class SimpleTransformer(nn.Module):
@@ -118,10 +122,8 @@ class SimpleTransformer(nn.Module):
         conditioning_emb = conditioning_emb.unsqueeze(1).expand(-1, seq_len, -1)  # [batch_size, seq_len, d_model]
         x = token_emb + conditioning_emb
         
-        # Add positional encoding
-        x = x.transpose(0, 1)  # [seq_len, batch_size, d_model]
-        x = self.pos_encoding(x)
-        x = x.transpose(0, 1)  # [batch_size, seq_len, d_model]
+        # Add positional encoding (no transpose needed with batch_first=True)
+        x = self.pos_encoding(x)  # [batch_size, seq_len, d_model]
         
         # Create causal mask for autoregressive generation
         if attention_mask is None:
@@ -141,15 +143,21 @@ class SimpleTransformer(nn.Module):
                  conditioning_points: torch.Tensor,
                  max_length: int,
                  temperature: float = 1.0,
-                 device: torch.device = None) -> torch.Tensor:
+                 device: torch.device = None,
+                 greedy: bool = False,
+                 start_tokens: Optional[torch.Tensor] = None,
+                 tokenizer = None) -> torch.Tensor:
         """
         Generate a sequence autoregressively.
         
         Args:
             conditioning_points: Conditioning points [batch_size, 4, 2]
             max_length: Maximum length to generate
-            temperature: Sampling temperature
+            temperature: Sampling temperature (ignored if greedy=True)
             device: Device to use for generation
+            greedy: If True, use argmax (deterministic). If False, sample from distribution
+            start_tokens: Optional starting tokens [batch_size, start_len]. If None, uses conditioning-based start
+            tokenizer: Tokenizer to convert conditioning values to tokens. If provided, uses first conditioning point as start token
             
         Returns:
             generated_tokens: Generated token sequence [batch_size, max_length]
@@ -160,21 +168,46 @@ class SimpleTransformer(nn.Module):
         batch_size = conditioning_points.shape[0]
         generated = torch.zeros(batch_size, max_length, dtype=torch.long, device=device)
         
-        # Start with a special token or zero
-        current_tokens = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+        # Determine start tokens
+        if start_tokens is not None:
+            current_tokens = start_tokens.to(device)
+        elif tokenizer is not None:
+            # Use first conditioning point to determine start token - MUCH BETTER APPROACH!
+            first_conditioning_values = conditioning_points[:, 0, 1].cpu().numpy()  # [batch_size] - first conditioning values
+            
+            # Convert conditioning values to tokens using the actual tokenizer
+            # This ensures we use the same tokenization scheme as training!
+            # Shape: [batch_size, 1] -> tokenizer expects [batch_size, sequence_length]
+            start_token_indices = tokenizer.tokenize(first_conditioning_values.reshape(-1, 1))[:, 0]
+            current_tokens = torch.from_numpy(start_token_indices).long().unsqueeze(1).to(device)  # [batch_size, 1]
+        else:
+            # Fallback: start with empty sequence (less optimal)
+            current_tokens = torch.zeros(batch_size, 0, dtype=torch.long, device=device)
         
         for i in range(max_length):
             # Forward pass
-            logits = self.forward(current_tokens, conditioning_points)
-            next_token_logits = logits[:, -1, :] / temperature
+            if current_tokens.shape[1] == 0:
+                # Special case: predict first token from conditioning only (empty sequence fallback)
+                dummy_tokens = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+                logits = self.forward(dummy_tokens, conditioning_points)
+                next_token_logits = logits[:, -1, :]
+            else:
+                logits = self.forward(current_tokens, conditioning_points)
+                next_token_logits = logits[:, -1, :]
             
-            # Sample next token (with numerical stability)
-            next_token_logits = torch.clamp(next_token_logits, min=-10, max=10)  # Prevent inf/nan
-            probs = F.softmax(next_token_logits, dim=-1)
-            # Ensure probabilities are valid
-            probs = torch.clamp(probs, min=1e-8, max=1.0)
-            probs = probs / probs.sum(dim=-1, keepdim=True)  # Renormalize
-            next_token = torch.multinomial(probs, 1)
+            # Select next token
+            if greedy or temperature == 0.0:
+                # Deterministic: pick most likely token
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            else:
+                # Stochastic: sample from distribution
+                next_token_logits = next_token_logits / temperature
+                # Numerical stability
+                next_token_logits = torch.clamp(next_token_logits, min=-10, max=10)
+                probs = F.softmax(next_token_logits, dim=-1)
+                probs = torch.clamp(probs, min=1e-8, max=1.0)
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+                next_token = torch.multinomial(probs, 1)
             
             # Add to generated sequence
             generated[:, i] = next_token.squeeze(-1)
